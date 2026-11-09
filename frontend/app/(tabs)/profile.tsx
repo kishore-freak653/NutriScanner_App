@@ -1,164 +1,224 @@
-import {
-  View,
-  Text,
-  StyleSheet,
-  TouchableOpacity,
-  ScrollView,
-} from "react-native";
 import { Ionicons } from "@expo/vector-icons";
-import { useAuth } from "../custom-hooks/useAuth";
-import colors from "../constants/color";
+import { useRouter } from "expo-router";
+import { useEffect, useMemo, useState } from "react";
+import { Pressable, ScrollView, StyleSheet, Switch, Text, View } from "react-native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
+import Toast from "react-native-toast-message";
+
+import { Button } from "@/components/Button";
+import { ScreenHeader } from "@/components/ScreenHeader";
+import { card, colors, fonts, radius, type } from "@/constants/design";
+import { useAuth } from "@/hooks/useAuth";
+import { useGoals } from "@/hooks/useGoals";
+import { useFoodRecords } from "@/hooks/useFoodRecords";
+import { confirmAction } from "@/utils/confirm";
+import { loggingStats, recordsForToday } from "@/utils/nutrition";
+import {
+  cancelReminders,
+  loadReminderSettings,
+  REMINDERS,
+  ReminderMeal,
+  ReminderSettings,
+  remindersSupported,
+  requestReminderPermission,
+  saveReminderSettings,
+  syncReminders,
+} from "@/utils/reminders";
+
+const initials = (name: string) =>
+  name
+    .trim()
+    .split(/\s+/)
+    .slice(0, 2)
+    .map((part) => part.charAt(0).toUpperCase())
+    .join("");
 
 export default function ProfileScreen() {
+  const insets = useSafeAreaInsets();
   const { user, logout } = useAuth();
+  const router = useRouter();
+  const { goal, macros } = useGoals();
+  const { records } = useFoodRecords();
+  const [reminders, setReminders] = useState<ReminderSettings | null>(null);
+
+  useEffect(() => {
+    if (remindersSupported) loadReminderSettings().then(setReminders);
+  }, []);
+
+  const daysTracked = useMemo(
+    () => new Set(records.map((r) => new Date(r.createdAt).toDateString())).size,
+    [records],
+  );
+  const { streak } = useMemo(() => loggingStats(records), [records]);
 
   if (!user) return null;
 
+  const toggleReminder = async (key: ReminderMeal, enabled: boolean) => {
+    if (!reminders) return;
+    if (enabled && !(await requestReminderPermission())) {
+      Toast.show({
+        type: "error",
+        text1: "Notifications are off",
+        text2: "Allow notifications for this app in your phone's settings.",
+      });
+      return;
+    }
+    const next = { ...reminders, [key]: enabled };
+    setReminders(next);
+    await saveReminderSettings(next);
+    await syncReminders(recordsForToday(records)).catch(() =>
+      Toast.show({ type: "error", text1: "Couldn't update your reminders" }),
+    );
+  };
+
+  const signOut = async () => {
+    await cancelReminders().catch(() => undefined);
+    logout();
+  };
+
   return (
-    <ScrollView style={styles.container} contentContainerStyle={styles.content}>
+    <ScrollView
+      style={styles.container}
+      contentContainerStyle={[styles.content, { paddingTop: insets.top + 8 }]}
+      showsVerticalScrollIndicator={false}
+      keyboardShouldPersistTaps="handled"
+    >
+      <ScreenHeader title="Profile" />
 
-      {/* Header */}
-      <Text style={styles.heading}>Profile</Text>
-
-      {/* Avatar */}
-      <View style={styles.avatarContainer}>
+      <View style={styles.identity}>
         <View style={styles.avatar}>
-          <Text style={styles.avatarText}>
-            {user.name.charAt(0).toUpperCase()}
+          <Text style={styles.avatarText}>{initials(user.name)}</Text>
+        </View>
+        <Text style={styles.name} numberOfLines={1}>
+          {user.name}
+        </Text>
+        <Text style={styles.email} numberOfLines={1}>
+          {user.email}
+        </Text>
+      </View>
+
+      <View style={styles.stats}>
+        <View style={styles.stat}>
+          <Text style={styles.statValue}>{records.length}</Text>
+          <Text style={styles.statLabel}>Meals logged</Text>
+        </View>
+        <View style={styles.stat}>
+          <Text style={styles.statValue}>{daysTracked}</Text>
+          <Text style={styles.statLabel}>Days tracked</Text>
+        </View>
+        <View style={styles.stat}>
+          <Text style={styles.statValue}>{streak}</Text>
+          <Text style={styles.statLabel}>Day streak</Text>
+        </View>
+      </View>
+
+      <Text style={styles.rowTitle}>Daily goals</Text>
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel="Edit daily goals"
+        style={({ pressed }) => [styles.row, pressed && styles.pressed]}
+        onPress={() => router.push("/goals")}
+      >
+        <Ionicons name="flame" size={20} color={colors.accent} />
+        <View style={styles.rowFill}>
+          <Text style={styles.rowValue}>{goal.toLocaleString("en-IN")} kcal</Text>
+          <Text style={styles.reminderTime}>
+            P {macros.protein} g · C {macros.carbs} g · F {macros.fat} g
           </Text>
         </View>
-        <Text style={styles.userName}>{user.name}</Text>
-        <Text style={styles.userEmail}>{user.email}</Text>
+        <Ionicons name="chevron-forward" size={18} color={colors.textSecondary} />
+      </Pressable>
+
+      <Text style={styles.rowTitle}>Weight</Text>
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel="Track your weight"
+        style={({ pressed }) => [styles.row, pressed && styles.pressed]}
+        onPress={() => router.push("/weight")}
+      >
+        <Ionicons name="scale-outline" size={20} color={colors.primary} />
+        <Text style={[styles.rowValue, styles.rowFill]}>Track your weight</Text>
+        <Ionicons name="chevron-forward" size={18} color={colors.textSecondary} />
+      </Pressable>
+
+      {reminders && (
+        <>
+          <Text style={styles.rowTitle}>Meal reminders</Text>
+          <View style={styles.reminders}>
+            {REMINDERS.map(({ key, label, time }) => (
+              <View key={key} style={styles.reminder}>
+                <View style={styles.rowFill}>
+                  <Text style={styles.rowValue}>{label}</Text>
+                  <Text style={styles.reminderTime}>{time}, if you haven&apos;t logged it</Text>
+                </View>
+                <Switch
+                  accessibilityLabel={`${label} reminder`}
+                  value={reminders[key]}
+                  onValueChange={(enabled) => toggleReminder(key, enabled)}
+                  trackColor={{ true: colors.primary, false: colors.border }}
+                  thumbColor={colors.surface}
+                />
+              </View>
+            ))}
+          </View>
+        </>
+      )}
+
+      <Text style={styles.rowTitle}>Phone number</Text>
+      <View style={styles.row}>
+        <Ionicons name="call" size={18} color={colors.primary} />
+        <Text style={[styles.rowValue, styles.rowFill]} numberOfLines={1}>
+          {user.phone || "Not set"}
+        </Text>
       </View>
 
-      {/* Info Cards */}
-      <View style={styles.infoCard}>
-
-        <View style={styles.infoRow}>
-          <Ionicons name="person-outline" size={20} color={colors.primary} />
-          <View style={styles.infoText}>
-            <Text style={styles.infoLabel}>Full Name</Text>
-            <Text style={styles.infoValue}>{user.name}</Text>
-          </View>
-        </View>
-
-        <View style={styles.divider} />
-
-        <View style={styles.infoRow}>
-          <Ionicons name="mail-outline" size={20} color={colors.primary} />
-          <View style={styles.infoText}>
-            <Text style={styles.infoLabel}>Email</Text>
-            <Text style={styles.infoValue}>{user.email}</Text>
-          </View>
-        </View>
-
-        <View style={styles.divider} />
-
-        <View style={styles.infoRow}>
-          <Ionicons name="call-outline" size={20} color={colors.primary} />
-          <View style={styles.infoText}>
-            <Text style={styles.infoLabel}>Phone</Text>
-            <Text style={styles.infoValue}>{user.phone}</Text>
-          </View>
-        </View>
-
-      </View>
-
-      {/* Logout Button */}
-      <TouchableOpacity style={styles.logoutBtn} onPress={logout}>
-        <Ionicons name="log-out-outline" size={20} color="white" />
-        <Text style={styles.logoutText}>  Logout</Text>
-      </TouchableOpacity>
-
+      <Button
+        label="Sign out"
+        icon="log-out-outline"
+        style={styles.signOut}
+        onPress={() =>
+          confirmAction("Sign out?", "You'll need to sign in again to see your meals.", "Sign out", signOut)
+        }
+      />
     </ScrollView>
   );
 }
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: colors.background,
-  },
-  content: {
-    padding: 20,
-    paddingTop: 60,
-  },
-  heading: {
-    fontSize: 28,
-    fontWeight: "800",
-    color: colors.textPrimary,
-    marginBottom: 30,
-  },
-  avatarContainer: {
-    alignItems: "center",
-    marginBottom: 32,
-  },
+  container: { flex: 1, backgroundColor: colors.background },
+  content: { paddingHorizontal: 16, paddingBottom: 24 },
+  identity: { alignItems: "center", marginBottom: 16 },
   avatar: {
-    width: 90,
-    height: 90,
-    borderRadius: 45,
-    backgroundColor: colors.primary,
-    justifyContent: "center",
+    width: 84,
+    height: 84,
+    borderRadius: radius.full,
+    backgroundColor: colors.primaryLight,
     alignItems: "center",
-    marginBottom: 12,
+    justifyContent: "center",
+    marginBottom: 10,
   },
-  avatarText: {
-    fontSize: 40,
-    fontWeight: "bold",
-    color: "white",
-  },
-  userName: {
-    fontSize: 22,
-    fontWeight: "700",
-    color: colors.textPrimary,
-    marginBottom: 4,
-  },
-  userEmail: {
-    fontSize: 14,
-    color: colors.textSecondary,
-  },
-  infoCard: {
-    backgroundColor: colors.surface,
-    borderRadius: 16,
-    padding: 20,
-    marginBottom: 24,
-    borderWidth: 1,
-    borderColor: "#1f1f1f",
-  },
-  infoRow: {
+  avatarText: { fontFamily: fonts.bold, fontSize: 28, lineHeight: 34, color: colors.primaryDark },
+  name: { ...type.h2, color: colors.textPrimary },
+  email: { ...type.body, color: colors.textSecondary },
+  stats: { flexDirection: "row", gap: 8, marginBottom: 16 },
+  stat: { ...card, flex: 1, alignItems: "center", padding: 14 },
+  statValue: { ...type.h1, fontSize: 24, lineHeight: 30, color: colors.textPrimary },
+  statLabel: { ...type.caption, color: colors.textSecondary, marginTop: 2 },
+  rowTitle: { ...type.h3, fontSize: 14, lineHeight: 20, color: colors.textPrimary, marginBottom: 8 },
+  row: {
+    ...card,
     flexDirection: "row",
     alignItems: "center",
-    paddingVertical: 12,
-    gap: 14,
+    gap: 10,
+    minHeight: 52,
+    paddingHorizontal: 14,
+    marginBottom: 16,
   },
-  infoText: {
-    flex: 1,
-  },
-  infoLabel: {
-    fontSize: 12,
-    color: colors.textSecondary,
-    marginBottom: 2,
-  },
-  infoValue: {
-    fontSize: 16,
-    color: colors.textPrimary,
-    fontWeight: "600",
-  },
-  divider: {
-    height: 1,
-    backgroundColor: "#1f1f1f",
-  },
-  logoutBtn: {
-    backgroundColor: "#e53935",
-    borderRadius: 14,
-    height: 55,
-    flexDirection: "row",
-    justifyContent: "center",
-    alignItems: "center",
-  },
-  logoutText: {
-    color: "white",
-    fontSize: 18,
-    fontWeight: "700",
-  },
+  rowValue: { ...type.body, fontFamily: fonts.semibold, color: colors.textPrimary },
+  rowFill: { flex: 1 },
+  pressed: { opacity: 0.7 },
+  reminders: { ...card, paddingHorizontal: 14, marginBottom: 16 },
+  reminder: { flexDirection: "row", alignItems: "center", gap: 10, minHeight: 56 },
+  reminderTime: { ...type.caption, color: colors.textSecondary },
+  signOut: { marginTop: 4 },
 });

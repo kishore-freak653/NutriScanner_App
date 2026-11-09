@@ -1,462 +1,415 @@
 /**
- * result.tsx
- * Displays AI-detected food nutrition results.
- *
- * Two modes:
- *  - Quantity Mode (needsQuantity=true): shows editable quantity inputs first,
- *    then calculates nutrition on confirm.
- *  - Direct Mode (needsQuantity=false): skips straight to nutrition results.
+ * Reviews a new meal before saving it, whatever its source: a scan, a typed
+ * description, a barcode or a manual entry. When amounts are uncertain the user
+ * confirms them first.
  */
 
-import {
-  View,
-  Text,
-  StyleSheet,
-  ScrollView,
-  Image,
-  TouchableOpacity,
-  Alert,
-  TextInput,
-  Share,
-} from "react-native";
-import { useLocalSearchParams, useRouter } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
-import { useState } from "react";
- // ✅ fixed path
+import * as Haptics from "expo-haptics";
+import { Image } from "expo-image";
+import { useLocalSearchParams, useRouter } from "expo-router";
+import { ComponentProps, useMemo, useState } from "react";
+import {
+  ActivityIndicator,
+  KeyboardAvoidingView,
+  Platform,
+  Pressable,
+  ScrollView,
+  Share,
+  StyleSheet,
+  Text,
+  TextInput,
+  View,
+} from "react-native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
+import Toast from "react-native-toast-message";
 
-import * as SecureStore from "expo-secure-store";
-import colors from "./constants/color";
-import { API } from "./utils/axiosInstance";
+import { AmountStepper } from "@/components/AmountStepper";
+import { Button } from "@/components/Button";
+import { MacroChips } from "@/components/MacroChips";
+import { MealTypePicker } from "@/components/MealTypePicker";
+import { ScreenHeader } from "@/components/ScreenHeader";
+import { card, colors, fonts, radius, type } from "@/constants/design";
+import { API, getErrorMessage } from "@/utils/api";
+import { defaultMealType, parseMeal, roundOne, scaleFood, sumFoods, Totals } from "@/utils/nutrition";
+import { encodePhoto, SAVED_PHOTO_SIDE } from "@/utils/photo";
+
+const NOTICES: Record<string, string> = {
+  scan: "These are AI estimates and may vary slightly from actual values.",
+  text: "These are AI estimates and may vary slightly from actual values.",
+  barcode: "From Open Food Facts, a community database. Check it against the packet.",
+};
+
+function ActionTile({
+  label,
+  icon,
+  color,
+  background,
+  loading,
+  disabled,
+  onPress,
+}: {
+  label: string;
+  icon: ComponentProps<typeof Ionicons>["name"];
+  color: string;
+  background: string;
+  loading?: boolean;
+  disabled?: boolean;
+  onPress: () => void;
+}) {
+  return (
+    <Pressable
+      accessibilityRole="button"
+      accessibilityLabel={label}
+      accessibilityState={{ disabled: !!disabled, busy: !!loading }}
+      disabled={disabled || loading}
+      onPress={onPress}
+      style={({ pressed }) => [
+        styles.tile,
+        { backgroundColor: background },
+        (pressed || disabled) && styles.tileDimmed,
+      ]}
+    >
+      {loading ? (
+        <ActivityIndicator color={color} />
+      ) : (
+        <Ionicons name={icon} size={20} color={color} />
+      )}
+      <Text style={[styles.tileLabel, { color }]}>{label}</Text>
+    </Pressable>
+  );
+}
 
 export default function ResultScreen() {
   const router = useRouter();
-  const { data, imageUri, needsQuantity } = useLocalSearchParams();
+  const insets = useSafeAreaInsets();
+  const { data, imageUri, needsQuantity, source } = useLocalSearchParams();
+  const { foods: scannedFoods, totals: scannedTotals } = useMemo(() => parseMeal(data), [data]);
+  const notice = NOTICES[source as string];
+
+  const [editing, setEditing] = useState(needsQuantity === "true");
+  // Amounts always scale from these, so repeated edits don't compound rounding.
+  const [foods, setFoods] = useState(scannedFoods);
+  const [amounts, setAmounts] = useState(() => scannedFoods.map((food) => String(food.quantity)));
+  const [currentFoods, setCurrentFoods] = useState(scannedFoods);
+  const [mealType, setMealType] = useState(() => defaultMealType());
+  const [totals, setTotals] = useState<Totals>(scannedTotals);
   const [saving, setSaving] = useState(false);
 
-  // ─── Parse AI result from navigation params ───
-  const isQuantityMode = needsQuantity === "true";
-  const result = JSON.parse(data as string);
-  const foods = result.foods || [];
+  const renameFood = (index: number, name: string) =>
+    setFoods((current) => current.map((food, i) => (i === index ? { ...food, name } : food)));
 
-  // ─── State ────────────────────────────────────
-  // quantities: tracks user-edited amounts per food name
-  const [quantities, setQuantities] = useState<{ [key: string]: number }>(
-    Object.fromEntries(foods.map((f: any) => [f.name, f.quantity])),
-  );
-  // calculated: false = show quantity inputs, true = show results
-  const [calculated, setCalculated] = useState(!isQuantityMode);
-  const [updatedFoods, setUpdatedFoods] = useState(foods);
-  const [totals, setTotals] = useState({
-    calories: result.totalCalories,
-    protein: result.totalProtein,
-    fat: result.totalFat,
-    carbs: result.totalCarbs,
-  });
-
-  // ─── Recalculate nutrition based on user-entered quantities ───
-  /**
-   * Scales each food item's nutrition proportionally to the new quantity.
-   * Formula: newValue = originalValue * (newQty / originalQty)
-   */
-  const recalculate = () => {
-    const newFoods = foods.map((food: any) => {
-      const newQty = quantities[food.name] || food.quantity;
-      const ratio = newQty / food.quantity; // scaling factor
-
-      return {
-        ...food,
-        quantity: newQty,
-        calories: Math.round(food.calories * ratio), // integer
-        protein: Math.round(food.protein * ratio * 10) / 10, // 1 decimal
-        fat: Math.round(food.fat * ratio * 10) / 10,
-        carbs: Math.round(food.carbs * ratio * 10) / 10,
-      };
-    });
-
-    setUpdatedFoods(newFoods);
-
-    // Sum up totals across all updated food items
-    setTotals({
-      calories: newFoods.reduce((s: number, f: any) => s + f.calories, 0),
-      protein:
-        Math.round(
-          newFoods.reduce((s: number, f: any) => s + f.protein, 0) * 10,
-        ) / 10,
-      fat:
-        Math.round(newFoods.reduce((s: number, f: any) => s + f.fat, 0) * 10) /
-        10,
-      carbs:
-        Math.round(
-          newFoods.reduce((s: number, f: any) => s + f.carbs, 0) * 10,
-        ) / 10,
-    });
-
-    setCalculated(true); // switch to results view
+  const removeFood = (index: number) => {
+    setFoods((current) => current.filter((_, i) => i !== index));
+    setAmounts((current) => current.filter((_, i) => i !== index));
   };
 
-  // ─── Save confirmed scan to MongoDB via backend ───
-  const saveToHistory = async () => {
+  const applyAmounts = () => {
+    if (foods.some((food) => !food.name.trim())) {
+      Toast.show({ type: "error", text1: "Every food needs a name" });
+      return;
+    }
+    const values = amounts.map(Number);
+    if (values.some((value) => !Number.isFinite(value) || value <= 0)) {
+      Toast.show({
+        type: "error",
+        text1: "Check your amounts",
+        text2: "Each amount needs to be a number above 0.",
+      });
+      return;
+    }
+    const scaled = foods.map((food, index) => scaleFood(food, values[index]));
+    setCurrentFoods(scaled);
+    setTotals(sumFoods(scaled));
+    setEditing(false);
+  };
+
+  const save = async () => {
     try {
       setSaving(true);
-      const savedToken = await SecureStore.getItemAsync("token");
+      const meal = {
+        foods: currentFoods,
+        totalCalories: totals.calories,
+        totalProtein: totals.protein,
+        totalFat: totals.fat,
+        totalCarbs: totals.carbs,
+        mealType,
+      };
+      const haptic = () => {
+        if (Platform.OS !== "web") {
+          Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+        }
+      };
 
-      await API.post(
-        "/food/scan",
-        {
-          foods: updatedFoods,
-          totalCalories: totals.calories,
-          totalProtein: totals.protein,
-          totalFat: totals.fat,
-          totalCarbs: totals.carbs,
-          imageUrl: imageUri,
-        },
-        { headers: { Authorization: `Bearer ${savedToken}` } },
-      );
-
-      Alert.alert("Saved! ✅", "Food record saved to history!", [
-        { text: "OK", onPress: () => router.replace("/(tabs)") },
-      ]);
-    } catch (error: any) {
-      Alert.alert("Error", "Could not save. Try again!");
-    } finally {
+      // A photo that can't be prepared shouldn't stop the meal being saved.
+      const encoded =
+        source === "scan" && imageUri
+          ? await encodePhoto(imageUri as string, SAVED_PHOTO_SIDE).catch(() => null)
+          : null;
+      const res = await API.post("/food/scan", { ...meal, image: encoded?.base64 });
+      haptic();
+      const photoLost = source === "scan" && (!encoded || res.data.photoSaved === false);
+      Toast.show({
+        type: "success",
+        text1: "Saved to your day",
+        text2: photoLost ? "The photo couldn't be saved." : undefined,
+      });
+      router.dismissTo("/(tabs)");
+    } catch (error) {
+      Toast.show({
+        type: "error",
+        text1: "Couldn't save this meal",
+        text2: getErrorMessage(error, "Please try again."),
+      });
       setSaving(false);
     }
   };
 
-  // ─── Share nutrition summary via device share sheet ───
-  const shareResults = async () => {
-    try {
-      await Share.share({
-        message:
-          `🥗 NutriScan Results\n\n` +
-          `📋 Foods: ${updatedFoods.map((f: any) => f.name).join(", ")}\n\n` +
-          `🔥 Calories: ${totals.calories} kcal\n` +
-          `💪 Protein: ${totals.protein}g\n` +
-          `🫧 Fat: ${totals.fat}g\n` +
-          `🌾 Carbs: ${totals.carbs}g\n\n` +
-          `Tracked with NutriScan 🌿`,
-      });
-    } catch (error) {
-      Alert.alert("Error", "Could not share results");
-    }
-  };
+  const share = () =>
+    Share.share({
+      message:
+        `${currentFoods.map((food) => food.name).join(", ")}\n\n` +
+        `Calories: ${totals.calories} kcal\n` +
+        `Protein: ${totals.protein}g\n` +
+        `Carbs: ${totals.carbs}g\n` +
+        `Fat: ${totals.fat}g\n\n` +
+        `Estimated with NutriScan`,
+    }).catch(() => undefined);
 
-  // ─── Render ───────────────────────────────────
+  const noFoods = foods.length === 0;
+  const photo = imageUri ? (
+    <Image
+      source={{ uri: imageUri as string }}
+      style={[styles.photo, editing && styles.photoShort]}
+      contentFit="cover"
+      accessibilityLabel="Scanned food photo"
+    />
+  ) : null;
+
   return (
-    <ScrollView style={styles.container} contentContainerStyle={styles.content}>
-      {/* Header — title changes based on current mode */}
-      <View style={styles.header}>
-        <TouchableOpacity onPress={() => router.back()}>
-          <Ionicons name="arrow-back" size={24} color={colors.textPrimary} />
-        </TouchableOpacity>
-        <Text style={styles.heading}>
-          {calculated ? "Nutrition Results" : "Confirm Quantities"}
-        </Text>
-        {/* Share button only visible after results are calculated */}
-        {calculated ? (
-          <TouchableOpacity onPress={shareResults}>
-            <Ionicons name="share-outline" size={24} color={colors.primary} />
-          </TouchableOpacity>
+    <KeyboardAvoidingView style={styles.container} behavior="padding">
+      <ScrollView
+        contentContainerStyle={[
+          styles.content,
+          { paddingTop: insets.top + 8, paddingBottom: insets.bottom + 24 },
+        ]}
+        keyboardShouldPersistTaps="handled"
+        showsVerticalScrollIndicator={false}
+      >
+        {noFoods ? (
+          <>
+            <ScreenHeader title="Meal results" onBack={() => router.back()} />
+            {photo}
+            <View style={styles.noFoods}>
+              <Text style={styles.foodsTitle}>No food found</Text>
+              <Text style={styles.noFoodsText}>
+                We didn&apos;t spot any food in that photo. Try a closer shot in better light.
+              </Text>
+              <Button label="Try another photo" icon="camera-outline" onPress={() => router.back()} />
+            </View>
+          </>
+        ) : editing ? (
+          <>
+            <ScreenHeader
+              title="Confirm amounts"
+              subtitle="Adjust the quantities if needed"
+              onBack={() => router.back()}
+            />
+            {photo}
+            {foods.map((food, index) => (
+              <View key={index} style={styles.amountRow}>
+                {foods.length > 1 && (
+                  <Pressable
+                    accessibilityRole="button"
+                    accessibilityLabel={`Remove ${food.name}`}
+                    hitSlop={8}
+                    onPress={() => removeFood(index)}
+                  >
+                    <Ionicons name="close-circle-outline" size={22} color={colors.error} />
+                  </Pressable>
+                )}
+                <View style={styles.amountText}>
+                  <TextInput
+                    accessibilityLabel={`Name of food ${index + 1}`}
+                    style={[styles.foodName, styles.nameInput]}
+                    value={food.name}
+                    selectionColor={colors.primary}
+                    onChangeText={(name) => renameFood(index, name)}
+                  />
+                  <Text style={styles.foodDetail} numberOfLines={1}>
+                    {food.unit}
+                  </Text>
+                </View>
+                <AmountStepper
+                  food={food}
+                  value={amounts[index]}
+                  onChange={(value) =>
+                    setAmounts((current) =>
+                      current.map((amount, i) => (i === index ? value : amount)),
+                    )
+                  }
+                />
+              </View>
+            ))}
+            <Button
+              label="Update nutrition"
+              trailingIcon="arrow-forward"
+              onPress={applyAmounts}
+              style={styles.update}
+            />
+          </>
         ) : (
-          <View style={{ width: 24 }} />
-        )}
-      </View>
-
-      {/* Scanned food image preview */}
-      {imageUri && (
-        <Image source={{ uri: imageUri as string }} style={styles.foodImage} />
-      )}
-
-      {/* ── STEP 1: Quantity Input Mode ── */}
-      {!calculated && (
-        <View style={styles.quantityCard}>
-          <View style={styles.quantityHeader}>
-            <Ionicons name="help-circle" size={20} color="#ffea00" />
-            <Text style={styles.quantityTitle}>Confirm Quantities</Text>
-          </View>
-          <Text style={styles.quantitySubtitle}>
-            AI couldn't determine exact amounts. Please confirm:
-          </Text>
-
-          {foods.map((food: any, index: number) => (
-            <View key={index} style={styles.quantityRow}>
-              <Text style={styles.quantityFoodName}>{food.name}</Text>
-              <TextInput
-                style={styles.quantityInput}
-                defaultValue={String(food.quantity)}
-                keyboardType="numeric"
-                onChangeText={(val) =>
-                  setQuantities((prev) => ({
-                    ...prev,
-                    [food.name]: parseFloat(val) || 0,
-                  }))
-                }
-                placeholderTextColor={colors.textSecondary}
-              />
-              <Text style={styles.quantityUnit}>{food.unit}</Text>
-            </View>
-          ))}
-
-          <TouchableOpacity style={styles.calculateBtn} onPress={recalculate}>
-            <Ionicons name="calculator" size={20} color="white" />
-            <Text style={styles.calculateBtnText}> Calculate Nutrition</Text>
-          </TouchableOpacity>
-        </View>
-      )}
-
-      {/* ── STEP 2: Nutrition Results ── */}
-      {calculated && (
-        <>
-          {/* Total nutrition summary card */}
-          <View style={styles.totalCard}>
-            <Text style={styles.totalTitle}>Total Nutrition</Text>
-            <View style={styles.macroRow}>
-              <View style={styles.macroItem}>
-                <Text style={[styles.macroValue, { color: colors.calories }]}>
-                  {totals.calories}
-                </Text>
-                <Text style={styles.macroLabel}>🔥 Cal</Text>
-              </View>
-              <View style={styles.macroItem}>
-                <Text style={[styles.macroValue, { color: colors.protein }]}>
-                  {totals.protein}g
-                </Text>
-                <Text style={styles.macroLabel}>💪 Protein</Text>
-              </View>
-              <View style={styles.macroItem}>
-                <Text style={[styles.macroValue, { color: colors.fat }]}>
-                  {totals.fat}g
-                </Text>
-                <Text style={styles.macroLabel}>🫧 Fat</Text>
-              </View>
-              <View style={styles.macroItem}>
-                <Text style={[styles.macroValue, { color: colors.carbs }]}>
-                  {totals.carbs}g
-                </Text>
-                <Text style={styles.macroLabel}>🌾 Carbs</Text>
-              </View>
-            </View>
-          </View>
-
-          {/* Per-food breakdown cards */}
-          <Text style={styles.sectionTitle}>Detected Foods</Text>
-          {updatedFoods.map((food: any, index: number) => (
-            <View key={index} style={styles.foodCard}>
-              <View style={styles.foodHeader}>
-                <Text style={styles.foodName}>{food.name}</Text>
-                <Text style={styles.foodQuantity}>
-                  {food.quantity} {food.unit}
-                </Text>
-              </View>
-              <View style={styles.foodMacros}>
-                <View style={styles.foodMacroItem}>
-                  <Text
-                    style={[styles.foodMacroValue, { color: colors.calories }]}
-                  >
-                    {food.calories}
-                  </Text>
-                  <Text style={styles.foodMacroLabel}>cal</Text>
-                </View>
-                <View style={styles.foodMacroItem}>
-                  <Text
-                    style={[styles.foodMacroValue, { color: colors.protein }]}
-                  >
-                    {food.protein}g
-                  </Text>
-                  <Text style={styles.foodMacroLabel}>protein</Text>
-                </View>
-                <View style={styles.foodMacroItem}>
-                  <Text style={[styles.foodMacroValue, { color: colors.fat }]}>
-                    {food.fat}g
-                  </Text>
-                  <Text style={styles.foodMacroLabel}>fat</Text>
-                </View>
-                <View style={styles.foodMacroItem}>
-                  <Text
-                    style={[styles.foodMacroValue, { color: colors.carbs }]}
-                  >
-                    {food.carbs}g
-                  </Text>
-                  <Text style={styles.foodMacroLabel}>carbs</Text>
-                </View>
-              </View>
-            </View>
-          ))}
-
-          {/* Action buttons */}
-          <TouchableOpacity
-            style={styles.saveBtn}
-            onPress={saveToHistory}
-            disabled={saving}
-          >
-            <Ionicons name="bookmark" size={20} color="white" />
-            <Text style={styles.saveBtnText}>
-              {saving ? "Saving..." : "  Save to History"}
+          <>
+            <ScreenHeader title="Meal results" onBack={() => router.back()} />
+            {photo}
+            <Text style={styles.foodsTitle} numberOfLines={2}>
+              {currentFoods.map((food) => food.name).join(" + ")}
             </Text>
-          </TouchableOpacity>
 
-          <TouchableOpacity
-            style={styles.discardBtn}
-            onPress={() => router.back()}
-          >
-            <Text style={styles.discardBtnText}>Scan Again</Text>
-          </TouchableOpacity>
-        </>
-      )}
-    </ScrollView>
+            <View style={styles.totalCard}>
+              <Text style={styles.totalLabel}>Total calories</Text>
+              <Text style={styles.totalValue}>
+                {totals.calories.toLocaleString("en-IN")} kcal
+              </Text>
+              <MacroChips totals={totals} />
+            </View>
+
+            <MealTypePicker value={mealType} onChange={setMealType} />
+
+            <Text style={styles.sectionTitle}>Breakdown</Text>
+            {currentFoods.map((food, index) => (
+              <View key={index} style={styles.breakdownRow}>
+                <View style={styles.amountIcon}>
+                  <Ionicons name="restaurant-outline" size={20} color={colors.primary} />
+                </View>
+                <View style={styles.amountText}>
+                  <Text style={styles.foodName} numberOfLines={1}>
+                    {food.name}
+                  </Text>
+                  <Text style={styles.foodDetail} numberOfLines={1}>
+                    {roundOne(food.quantity)} {food.unit} · {food.calories.toLocaleString("en-IN")} kcal
+                  </Text>
+                  <Text style={styles.foodDetail} numberOfLines={1}>
+                    P {food.protein}g · C {food.carbs}g · F {food.fat}g
+                  </Text>
+                </View>
+              </View>
+            ))}
+
+            {notice && (
+              <View style={styles.notice}>
+                <Ionicons name="information-circle-outline" size={18} color={colors.carbs} />
+                <Text style={styles.noticeText}>{notice}</Text>
+              </View>
+            )}
+
+            <Button label="Edit amounts" variant="outlined" onPress={() => setEditing(true)} />
+
+            <View style={styles.tiles}>
+              <ActionTile
+                label="Share"
+                icon="share-social-outline"
+                color={colors.primaryDark}
+                background={colors.primaryLight}
+                disabled={saving}
+                onPress={share}
+              />
+              <ActionTile
+                label="Save"
+                icon="bookmark-outline"
+                color={colors.onPrimary}
+                background={colors.primary}
+                loading={saving}
+                onPress={save}
+              />
+              <ActionTile
+                label="Discard"
+                icon="trash-outline"
+                color={colors.errorDark}
+                background={colors.errorLight}
+                disabled={saving}
+                onPress={() => router.back()}
+              />
+            </View>
+          </>
+        )}
+      </ScrollView>
+    </KeyboardAvoidingView>
   );
 }
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: colors.background },
-  content: { padding: 20, paddingTop: 55, paddingBottom: 40 },
-  header: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    marginBottom: 20,
-  },
-  heading: { fontSize: 20, fontWeight: "700", color: colors.textPrimary },
-  foodImage: {
-    width: "100%",
-    height: 220,
-    borderRadius: 20,
-    marginBottom: 20,
-    resizeMode: "cover",
-  },
+  content: { flexGrow: 1, paddingHorizontal: 16 },
+  photo: { width: "100%", height: 200, borderRadius: radius.card, marginBottom: 12 },
+  photoShort: { height: 160 },
+  noFoods: { marginTop: 4 },
+  noFoodsText: { ...type.body, color: colors.textSecondary, marginBottom: 16 },
+  foodsTitle: { ...type.h2, color: colors.textPrimary, marginBottom: 10 },
   totalCard: {
-    backgroundColor: colors.surface,
-    borderRadius: 16,
-    padding: 20,
-    marginBottom: 24,
-    borderWidth: 1,
-    borderColor: "#1f1f1f",
-  },
-  totalTitle: {
-    fontSize: 16,
-    fontWeight: "700",
-    color: colors.textPrimary,
+    backgroundColor: colors.primaryLight,
+    borderRadius: radius.card,
+    padding: 14,
     marginBottom: 16,
+  },
+  totalLabel: { ...type.body, color: colors.textPrimary, textAlign: "center" },
+  totalValue: {
+    fontFamily: fonts.bold,
+    fontSize: 28,
+    lineHeight: 36,
+    color: colors.primaryDark,
     textAlign: "center",
-  },
-  macroRow: { flexDirection: "row", justifyContent: "space-between" },
-  macroItem: { alignItems: "center", flex: 1 },
-  macroValue: { fontSize: 22, fontWeight: "800" },
-  macroLabel: { fontSize: 11, color: colors.textSecondary, marginTop: 4 },
-  sectionTitle: {
-    fontSize: 18,
-    fontWeight: "700",
-    color: colors.textPrimary,
-    marginBottom: 12,
-  },
-  foodCard: {
-    backgroundColor: colors.surface,
-    borderRadius: 14,
-    padding: 16,
     marginBottom: 10,
-    borderWidth: 1,
-    borderColor: "#1f1f1f",
   },
-  foodHeader: {
+  sectionTitle: { ...type.h3, color: colors.textPrimary, marginBottom: 8 },
+  breakdownRow: {
+    ...card,
     flexDirection: "row",
-    justifyContent: "space-between",
     alignItems: "center",
+    gap: 12,
+    padding: 10,
+    marginBottom: 8,
+  },
+  amountRow: {
+    ...card,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    padding: 10,
+    marginBottom: 8,
+  },
+  amountIcon: {
+    width: 44,
+    height: 44,
+    borderRadius: 10,
+    backgroundColor: colors.primaryLight,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  amountText: { flex: 1 },
+  nameInput: { padding: 0 },
+  foodName: { ...type.body, fontFamily: fonts.semibold, color: colors.textPrimary },
+  foodDetail: { ...type.caption, color: colors.textSecondary, marginTop: 1 },
+  update: { marginTop: 12 },
+  notice: {
+    flexDirection: "row",
+    gap: 8,
+    backgroundColor: colors.carbsLight,
+    borderRadius: radius.card,
+    padding: 12,
+    marginTop: 4,
     marginBottom: 12,
   },
-  foodName: { fontSize: 16, fontWeight: "700", color: colors.textPrimary },
-  foodQuantity: {
-    fontSize: 13,
-    color: colors.textSecondary,
-    backgroundColor: "#1f1f1f",
-    paddingHorizontal: 10,
-    paddingVertical: 4,
-    borderRadius: 20,
-  },
-  foodMacros: { flexDirection: "row", justifyContent: "space-between" },
-  foodMacroItem: { alignItems: "center", flex: 1 },
-  foodMacroValue: { fontSize: 16, fontWeight: "700" },
-  foodMacroLabel: { fontSize: 11, color: colors.textSecondary, marginTop: 2 },
-  saveBtn: {
-    backgroundColor: colors.primary,
-    borderRadius: 14,
-    height: 55,
-    flexDirection: "row",
-    justifyContent: "center",
-    alignItems: "center",
-    marginTop: 24,
-    elevation: 4,
-  },
-  saveBtnText: { color: "white", fontSize: 17, fontWeight: "700" },
-  discardBtn: {
-    borderRadius: 14,
-    height: 50,
-    justifyContent: "center",
-    alignItems: "center",
-    marginTop: 10,
-    borderWidth: 1,
-    borderColor: "#1f1f1f",
-  },
-  discardBtnText: { color: colors.textSecondary, fontSize: 16 },
-  quantityCard: {
-    backgroundColor: "#1a1500",
-    borderRadius: 16,
-    padding: 16,
-    marginBottom: 20,
-    borderWidth: 1,
-    borderColor: "#ffea0033",
-  },
-  quantityHeader: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 8,
-    marginBottom: 6,
-  },
-  quantityTitle: { fontSize: 15, fontWeight: "700", color: "#ffea00" },
-  quantitySubtitle: {
-    fontSize: 12,
-    color: colors.textSecondary,
-    marginBottom: 14,
-  },
-  quantityRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    paddingVertical: 8,
-    borderTopWidth: 1,
-    borderTopColor: "#2a2a00",
-  },
-  quantityFoodName: {
+  noticeText: { ...type.caption, flex: 1, color: colors.textPrimary },
+  tiles: { flexDirection: "row", gap: 8, marginTop: 12 },
+  tile: {
     flex: 1,
-    fontSize: 14,
-    fontWeight: "600",
-    color: colors.textPrimary,
-  },
-  quantityInput: {
-    backgroundColor: "#111",
-    borderWidth: 1,
-    borderColor: "#ffea0055",
-    borderRadius: 8,
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    color: "white",
-    width: 70,
-    textAlign: "center",
-    fontSize: 14,
-  },
-  quantityUnit: {
-    fontSize: 13,
-    color: colors.textSecondary,
-    marginLeft: 8,
-    width: 40,
-  },
-  calculateBtn: {
-    backgroundColor: colors.primary,
-    borderRadius: 12,
-    height: 50,
-    flexDirection: "row",
-    justifyContent: "center",
+    height: 62,
+    borderRadius: radius.button,
     alignItems: "center",
-    marginTop: 16,
+    justifyContent: "center",
+    gap: 4,
   },
-  calculateBtnText: { color: "white", fontSize: 16, fontWeight: "700" },
+  tileDimmed: { opacity: 0.7 },
+  tileLabel: { fontFamily: fonts.semibold, fontSize: 12, lineHeight: 16 },
 });

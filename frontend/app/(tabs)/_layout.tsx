@@ -1,58 +1,50 @@
-import { Tabs } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
-import colors from "../constants/color";
+import { Tabs } from "expo-router";
+import { ComponentProps } from "react";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
+import { colors, fonts } from "@/constants/design";
+
+type IconName = ComponentProps<typeof Ionicons>["name"];
+
+const tabIcon =
+  (active: IconName, inactive: IconName) =>
+  function TabIcon({ color, focused }: { color: string; focused: boolean }) {
+    return <Ionicons name={focused ? active : inactive} size={24} color={color} />;
+  };
 
 export default function TabLayout() {
+  const insets = useSafeAreaInsets();
+
   return (
     <Tabs
       screenOptions={{
         headerShown: false,
         tabBarStyle: {
           backgroundColor: colors.surface,
-          borderTopColor: "#1f1f1f",
+          borderTopColor: colors.border,
+          height: 62 + insets.bottom,
+          paddingTop: 6,
         },
-        tabBarActiveTintColor: colors.primary,
+        tabBarLabelStyle: { fontFamily: fonts.semibold, fontSize: 11, lineHeight: 14 },
+        tabBarActiveTintColor: colors.primaryDark,
         tabBarInactiveTintColor: colors.textSecondary,
       }}
     >
       <Tabs.Screen
         name="index"
-        options={{
-          title: "Home",
-          tabBarIcon: ({ color }) => (
-            <Ionicons name="home" size={24} color={color} />
-          ),
-        }}
+        options={{ title: "Today", tabBarIcon: tabIcon("home", "home-outline") }}
       />
-
       <Tabs.Screen
         name="Scan"
-        options={{
-          title: "Scan",
-          tabBarIcon: ({ color }) => (
-            <Ionicons name="camera" size={24} color={color} />
-          ),
-        }}
+        options={{ title: "Scan", tabBarIcon: tabIcon("scan", "scan-outline") }}
       />
-
       <Tabs.Screen
         name="History"
-        options={{
-          title: "History",
-          tabBarIcon: ({ color }) => (
-            <Ionicons name="time" size={24} color={color} />
-          ),
-        }}
+        options={{ title: "History", tabBarIcon: tabIcon("time", "time-outline") }}
       />
-
       <Tabs.Screen
         name="profile"
-        options={{
-          title: "Profile",
-          tabBarIcon: ({ color }) => (
-            <Ionicons name="person" size={24} color={color} />
-          ),
-        }}
+        options={{ title: "Profile", tabBarIcon: tabIcon("person", "person-outline") }}
       />
     </Tabs>
   );

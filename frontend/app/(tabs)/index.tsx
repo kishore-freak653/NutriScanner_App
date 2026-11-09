@@ -1,294 +1,249 @@
-import {
-  View,
-  Text,
-  StyleSheet,
-  TouchableOpacity,
-  ScrollView,
-  Image,
-} from "react-native";
-import { useRouter } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
-import colors from "../constants/color";
-import { useAuth } from "../custom-hooks/useAuth";
-import { useEffect } from "react";
+import { Image } from "expo-image";
+import { useRouter } from "expo-router";
+import { useCallback, useEffect, useMemo } from "react";
+import {
+  ActivityIndicator,
+  Pressable,
+  RefreshControl,
+  ScrollView,
+  StyleSheet,
+  Text,
+  View,
+} from "react-native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
+import Toast from "react-native-toast-message";
 
-export default function HomeScreen() {
+import { Button } from "@/components/Button";
+import { CalorieRing } from "@/components/CalorieRing";
+import { MacroBars } from "@/components/MacroBars";
+import { QuickAdd } from "@/components/QuickAdd";
+import { RecordCard } from "@/components/RecordCard";
+import { WaterCard } from "@/components/WaterCard";
+import { WeekChart } from "@/components/WeekChart";
+import { WeeklySummary } from "@/components/WeeklySummary";
+import { card, colors, fonts, radius, type } from "@/constants/design";
+import { useAuth } from "@/hooks/useAuth";
+import { useGoals } from "@/hooks/useGoals";
+import { useFoodRecords } from "@/hooks/useFoodRecords";
+import { getErrorMessage } from "@/utils/api";
+import { openSavedMeal } from "@/utils/navigation";
+import {
+  FoodRecord,
+  lastSevenDays,
+  loggingStats,
+  mealName,
+  recentMeals,
+  recordsForToday,
+  sumRecords,
+} from "@/utils/nutrition";
+import { syncReminders } from "@/utils/reminders";
+
+const greetingFor = (hour: number) => {
+  if (hour < 12) return "Good Morning,";
+  if (hour < 17) return "Good Afternoon,";
+  return "Good Evening,";
+};
+
+export default function TodayScreen() {
   const router = useRouter();
-  const { user, loading } = useAuth();
+  const insets = useSafeAreaInsets();
+  const { user } = useAuth();
+  const { goal, macros } = useGoals();
+  const { records, loading, refreshing, error, refresh, retry, remove, logAgain } = useFoodRecords();
 
+  const todaysRecords = useMemo(() => recordsForToday(records), [records]);
+  const totals = useMemo(() => sumRecords(todaysRecords), [todaysRecords]);
+  const week = useMemo(() => lastSevenDays(records), [records]);
+  const stats = useMemo(() => loggingStats(records), [records]);
+  const usualMeals = useMemo(() => recentMeals(records, 6), [records]);
+  const firstName = user?.name?.split(" ")[0] ?? "there";
+  const openScan = () => router.push("/(tabs)/Scan");
+  const openAddMeal = () => router.push("/add-meal");
+  const openMeal = useCallback((record: FoodRecord) => openSavedMeal(router, record), [router]);
+
+  // Skips today's reminder for any meal that's already logged.
   useEffect(() => {
-    if (!loading && !user) {
-      router.replace("/auth/login");
-    }
-  }, [user, loading]);
+    if (!loading && !error) syncReminders(todaysRecords).catch(() => undefined);
+  }, [loading, error, todaysRecords]);
 
-  if (loading || !user) return null;
+  const quickAdd = useCallback(
+    async (record: FoodRecord) => {
+      try {
+        const added = await logAgain(record);
+        Toast.show({
+          type: "success",
+          text1: `Added ${mealName(record)}`,
+          text2: "Tap to undo",
+          onPress: () => {
+            Toast.hide();
+            remove(added._id).catch(() =>
+              Toast.show({ type: "error", text1: "Couldn't undo that" }),
+            );
+          },
+        });
+      } catch (err) {
+        Toast.show({
+          type: "error",
+          text1: "Couldn't add that meal",
+          text2: getErrorMessage(err, "Please try again."),
+        });
+      }
+    },
+    [logAgain, remove],
+  );
 
   return (
-    <ScrollView style={styles.container} contentContainerStyle={styles.content}>
-
-      {/* Header */}
+    <ScrollView
+      style={styles.container}
+      contentContainerStyle={[styles.content, { paddingTop: insets.top + 16 }]}
+      showsVerticalScrollIndicator={false}
+      refreshControl={
+        <RefreshControl refreshing={refreshing} onRefresh={refresh} tintColor={colors.primary} />
+      }
+    >
       <View style={styles.header}>
-        <View style={styles.logoRow}>
-          <Ionicons name="leaf" size={26} color={colors.primary} />
-          <Text style={styles.appName}>NutriScan</Text>
+        <View style={styles.headerText}>
+          <Text style={styles.greeting}>{greetingFor(new Date().getHours())}</Text>
+          <Text style={styles.name} numberOfLines={1} accessibilityRole="header">
+            {firstName} 👋
+          </Text>
         </View>
-        <TouchableOpacity
-          style={styles.avatar}
-          onPress={() => router.push("/(tabs)/profile")}
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="Open meal history"
+          hitSlop={8}
+          style={styles.calendar}
+          onPress={() => router.push("/(tabs)/History")}
         >
-          <Text style={styles.avatarText}>
-            {user?.name?.charAt(0).toUpperCase() ?? "?"}
-          </Text>
-        </TouchableOpacity>
+          <Ionicons name="calendar-outline" size={22} color={colors.textPrimary} />
+        </Pressable>
       </View>
 
-      {/* Welcome */}
-      <Text style={styles.welcomeText}>
-        Welcome back, {user?.name?.split(" ")[0] ?? "User"}! 👋
-      </Text>
-      <Text style={styles.welcomeSub}>
-        Track your nutrition with AI-powered food scanning
-      </Text>
+      {error && (
+        <Pressable accessibilityRole="button" style={styles.errorBanner} onPress={retry}>
+          <Text style={styles.errorText}>{error} Tap to retry.</Text>
+        </Pressable>
+      )}
 
-      {/* Banner Card */}
-      <View style={styles.bannerCard}>
-        <View style={styles.bannerTextCol}>
-          <View style={styles.aiBadge}>
-            <Ionicons name="sparkles" size={12} color={colors.primary} />
-            <Text style={styles.aiBadgeText}>AI Powered</Text>
+      {loading ? (
+        <ActivityIndicator style={styles.spinner} size="large" color={colors.primary} />
+      ) : records.length === 0 && !error ? (
+        <View style={styles.welcome}>
+          <Image
+            source={require("../../assets/images/ScanImage.png")}
+            style={styles.welcomeImage}
+            contentFit="cover"
+          />
+          <View style={styles.welcomeBody}>
+            <Text style={styles.welcomeTitle}>Scan your first meal</Text>
+            <Text style={styles.welcomeText}>
+              Take a photo and get an estimate of its calories, protein, carbs
+              and fat in seconds.
+            </Text>
+            <Button label="Scan food" icon="camera-outline" onPress={openScan} />
+            <Button
+              label="Add without a photo"
+              icon="create-outline"
+              variant="outlined"
+              onPress={openAddMeal}
+              style={styles.addFirst}
+            />
           </View>
-          <Text style={styles.bannerTitle}>Scan any food instantly</Text>
-          <Text style={styles.bannerSub}>
-            Get calories, protein, carbs & fat in seconds
-          </Text>
         </View>
-        <Image
-          source={require("../../assets/images/ScanImage.png")}
-          style={styles.bannerImage}
-        />
-      </View>
+      ) : (
+        <>
+          <View style={styles.summary}>
+            <CalorieRing consumed={totals.calories} goal={goal} />
+            <MacroBars totals={totals} goals={macros} />
+          </View>
+          <View style={styles.actions}>
+            <Button
+              label="Scan Meal"
+              icon="camera-outline"
+              stacked
+              onPress={openScan}
+              style={styles.action}
+            />
+            <Button
+              label="Add Meal"
+              icon="add"
+              variant="outlined"
+              stacked
+              onPress={openAddMeal}
+              style={styles.action}
+            />
+          </View>
 
-      {/* Scan Button */}
-      <TouchableOpacity
-        style={styles.scanButton}
-        onPress={() => router.push("/(tabs)/Scan")}
-      >
-        <Ionicons name="camera" size={22} color="white" />
-        <Text style={styles.scanText}>  Scan Food</Text>
-      </TouchableOpacity>
+          <View style={styles.sectionHeader}>
+            <Text style={styles.sectionTitle}>Recent Meals</Text>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="View all history"
+              hitSlop={12}
+              onPress={() => router.push("/(tabs)/History")}
+            >
+              <Text style={styles.link}>View All</Text>
+            </Pressable>
+          </View>
+          {records.slice(0, 3).map((record) => (
+            <RecordCard key={record._id} record={record} onPress={openMeal} />
+          ))}
 
-      {/* Quick Stats Row */}
-      <View style={styles.statsRow}>
-        <View style={styles.statCard}>
-          <Ionicons name="flame" size={22} color="#ff6b35" />
-          <Text style={styles.statLabel}>Calories</Text>
-          <Text style={styles.statSub}>Track daily</Text>
-        </View>
-        <View style={styles.statCard}>
-          <Ionicons name="barbell" size={22} color="#2979ff" />
-          <Text style={styles.statLabel}>Protein</Text>
-          <Text style={styles.statSub}>Build muscle</Text>
-        </View>
-        <View style={styles.statCard}>
-          <Ionicons name="leaf" size={22} color={colors.primary} />
-          <Text style={styles.statLabel}>Nutrition</Text>
-          <Text style={styles.statSub}>Stay healthy</Text>
-        </View>
-      </View>
+          <QuickAdd meals={usualMeals} onAdd={quickAdd} />
+          <WaterCard />
+          <WeeklySummary {...stats} />
 
-      {/* Recent Scans */}
-      {/* <View style={styles.sectionHeader}>
-        <Text style={styles.sectionTitle}>Recent Scans</Text>
-        <TouchableOpacity onPress={() => router.push("/(tabs)/History")}>
-          <Text style={styles.seeAll}>See all →</Text>
-        </TouchableOpacity>
-      </View> */}
-
-      {/* <View style={styles.emptyCard}>
-        <Ionicons name="receipt-outline" size={36} color={colors.textSecondary} />
-        <Text style={styles.emptyText}>No scans yet</Text>
-        <Text style={styles.emptySubText}>
-          Tap Scan Food to get started!
-        </Text>
-      </View> */}
-
+          <Text style={[styles.sectionTitle, styles.chartTitle]}>Calories (last 7 days)</Text>
+          <View style={styles.chartCard}>
+            <WeekChart days={week} goal={goal} />
+          </View>
+        </>
+      )}
     </ScrollView>
   );
 }
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: colors.background,
-  },
-  content: {
-    padding: 20,
-    paddingTop: 60,
-    paddingBottom: 30,
-  },
-  header: {
-    flexDirection: "row",
-    justifyContent: "space-between",
+  container: { flex: 1, backgroundColor: colors.background },
+  content: { paddingHorizontal: 16, paddingBottom: 24 },
+  header: { flexDirection: "row", alignItems: "center", gap: 12, marginBottom: 14 },
+  headerText: { flex: 1 },
+  greeting: { ...type.body, color: colors.textSecondary },
+  name: { ...type.h1, fontSize: 24, lineHeight: 30, color: colors.textPrimary },
+  calendar: {
+    ...card,
+    width: 44,
+    height: 44,
     alignItems: "center",
-    marginBottom: 20,
-  },
-  logoRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 8,
-  },
-  appName: {
-    fontSize: 22,
-    fontWeight: "800",
-    color: colors.textPrimary,
-  },
-  avatar: {
-    width: 42,
-    height: 42,
-    borderRadius: 21,
-    backgroundColor: colors.primary,
     justifyContent: "center",
-    alignItems: "center",
   },
-  avatarText: {
-    color: "white",
-    fontSize: 18,
-    fontWeight: "bold",
+  spinner: { marginTop: 80 },
+  errorBanner: {
+    backgroundColor: colors.errorLight,
+    borderRadius: radius.card,
+    padding: 12,
+    marginBottom: 12,
   },
-  welcomeText: {
-    fontSize: 24,
-    fontWeight: "800",
-    color: colors.textPrimary,
-    marginBottom: 6,
-  },
-  welcomeSub: {
-    fontSize: 14,
-    color: colors.textSecondary,
-    marginBottom: 20,
-  },
-  bannerCard: {
-    backgroundColor: colors.surfaceLight,
-    borderRadius: 20,
-    padding: 20,
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-    marginBottom: 14,
-    borderWidth: 1,
-    borderColor: "#1f1f1f",
-    overflow: "hidden",
-    minHeight: 150,
-  },
-  bannerTextCol: {
-    flex: 1,
-    paddingRight: 10,
-  },
-  aiBadge: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 4,
-    backgroundColor: "#0d2b1a",
-    paddingHorizontal: 10,
-    paddingVertical: 4,
-    borderRadius: 20,
-    alignSelf: "flex-start",
-    marginBottom: 10,
-  },
-  aiBadgeText: {
-    color: colors.primary,
-    fontSize: 11,
-    fontWeight: "600",
-  },
-  bannerTitle: {
-    fontSize: 18,
-    fontWeight: "800",
-    color: colors.textPrimary,
-    marginBottom: 6,
-  },
-  bannerSub: {
-    fontSize: 12,
-    color: colors.textSecondary,
-    lineHeight: 18,
-  },
-  bannerImage: {
-    width: 120,
-    height: 120,
-    resizeMode: "contain",
-  },
-  scanButton: {
-    backgroundColor: colors.primary,
-    borderRadius: 16,
-    height: 56,
-    flexDirection: "row",
-    justifyContent: "center",
-    alignItems: "center",
-    marginBottom: 24,
-    elevation: 4,
-  },
-  scanText: {
-    color: "white",
-    fontSize: 18,
-    fontWeight: "700",
-  },
-  statsRow: {
-    flexDirection: "row",
-    gap: 10,
-    marginBottom: 28,
-  },
-  statCard: {
-    flex: 1,
-    backgroundColor: colors.surface,
-    borderRadius: 14,
-    padding: 14,
-    alignItems: "center",
-    gap: 6,
-    marginTop:10,
-    borderWidth: 1,
-    borderColor: "#1f1f1f",
-  },
-  statLabel: {
-    fontSize: 13,
-    fontWeight: "700",
-    color: colors.textPrimary,
-  },
-  statSub: {
-    fontSize: 11,
-    color: colors.textSecondary,
-  },
+  errorText: { ...type.body, fontFamily: fonts.semibold, color: colors.errorDark },
+  summary: { ...card, flexDirection: "row", alignItems: "center", gap: 14, padding: 14 },
+  actions: { flexDirection: "row", gap: 8, marginTop: 12 },
+  action: { flex: 1 },
+  addFirst: { marginTop: 8 },
   sectionHeader: {
     flexDirection: "row",
     justifyContent: "space-between",
     alignItems: "center",
-    marginBottom: 12,
+    marginTop: 20,
+    marginBottom: 8,
   },
-  sectionTitle: {
-    fontSize: 18,
-    fontWeight: "700",
-    color: colors.textPrimary,
-  },
-  seeAll: {
-    fontSize: 13,
-    color: colors.primary,
-    fontWeight: "600",
-  },
-  emptyCard: {
-    backgroundColor: colors.surface,
-    borderRadius: 16,
-    padding: 30,
-    alignItems: "center",
-    gap: 8,
-    borderWidth: 1,
-    borderColor: "#1f1f1f",
-  },
-  emptyText: {
-    color: colors.textPrimary,
-    fontSize: 15,
-    fontWeight: "600",
-  },
-  emptySubText: {
-    color: colors.textSecondary,
-    fontSize: 13,
-    textAlign: "center",
-  },
+  sectionTitle: { ...type.h3, color: colors.textPrimary },
+  link: { ...type.body, fontFamily: fonts.semibold, color: colors.primaryDark },
+  chartCard: { ...card, padding: 16 },
+  chartTitle: { marginTop: 20, marginBottom: 8 },
+  welcome: { ...card, overflow: "hidden", marginTop: 8 },
+  welcomeImage: { width: "100%", aspectRatio: 1.6 },
+  welcomeBody: { padding: 16 },
+  welcomeTitle: { ...type.h2, color: colors.textPrimary, marginBottom: 4 },
+  welcomeText: { ...type.body, color: colors.textSecondary, marginBottom: 16 },
 });

@@ -1,10 +1,11 @@
+import "dotenv/config";
 import express from "express";
 import cors from "cors";
-import dotenv from "dotenv";
 import connectDB from "./config/db.js";
 import authRoutes from "./routes/authRoutes.js"
 import foodRoutes from "./routes/foodRoutes.js";
-dotenv.config();
+import trackingRoutes from "./routes/trackingRoutes.js";
+import pushRoutes from "./routes/pushRoutes.js";
 
 
 const app = express();
@@ -27,6 +28,10 @@ app.use("/api/auth",authRoutes)
 // app.use("/api/user", UserRoutes);
 
 app.use("/api/food", foodRoutes);
+
+app.use("/api/tracking", trackingRoutes);
+
+app.use("/api/push", pushRoutes);
 
 // read port from environment or fallback to 3000
 const PORT = process.env.PORT || 3000;
