@@ -1,4 +1,4 @@
-import User from "../models/User.js";
+import { createUser, findUserByEmail } from "../models/User.js";
 import bcrypt from "bcryptjs";
 import { generateToken } from "../utils/generateToken.js";
 
@@ -22,7 +22,7 @@ export const register = async (req, res) => {
     const normalizedEmail = email.toLowerCase().trim();
 
     // 3. Check duplicate
-    const existingUser = await User.findOne({ email: normalizedEmail });
+    const existingUser = await findUserByEmail(normalizedEmail);
     if (existingUser) {
       return res.status(400).json({
         message: "Email already registered",
@@ -34,7 +34,7 @@ export const register = async (req, res) => {
     const hashedPassword = await bcrypt.hash(password, salt);
 
     // 5. Create user
-    const newUser = await User.create({
+    const newUser = await createUser({
       name,
       email: normalizedEmail,
       phone,
@@ -44,15 +44,15 @@ export const register = async (req, res) => {
     // 6. Respond (never send password back)
     res.status(201).json({
       message: "User Registered Successfully",
-      _id: newUser.id,
+      _id: newUser._id,
       name: newUser.name,
       email: newUser.email,
       phone: newUser.phone,
-      token: generateToken(newUser.id),
+      token: generateToken(newUser._id),
     });
   } catch (error) {
-    // Handle MongoDB duplicate key error
-    if (error.code === 11000) {
+    // Handle Postgres unique violation (two registrations at once)
+    if (error.code === "23505") {
       return res.status(400).json({
         message: "Email already registered",
       });
@@ -81,7 +81,7 @@ export const login = async (req, res) => {
     const normalizedEmail = email.toLowerCase().trim();
 
     // 3. Find user
-    const user = await User.findOne({ email: normalizedEmail });
+    const user = await findUserByEmail(normalizedEmail);
     if (!user) {
       return res.status(400).json({
         message: "Invalid credentials",
@@ -99,7 +99,7 @@ export const login = async (req, res) => {
     // 5. Respond with token
     res.status(200).json({
       message: "Login successful",
-      _id: user.id,
+      _id: user._id,
       name: user.name,
       email: user.email,
       phone: user.phone,

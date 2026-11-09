@@ -1,5 +1,5 @@
 import jwt from "jsonwebtoken";
-import User from "../models/User.js";
+import { findUserById } from "../models/User.js";
 
 // ─────────────────────────────────────────
 // @desc    Protect private routes
@@ -28,7 +28,7 @@ export const protect = async (req, res, next) => {
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
 
     // 4. Check if user still exists in DB
-    const user = await User.findById(decoded.id).select("-password -__v");
+    const user = await findUserById(decoded.id);
 
     if (!user) {
       return res.status(401).json({
